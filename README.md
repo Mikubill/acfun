@@ -6,6 +6,9 @@ Simple AcFun Video Uploader
 
 ## usage
 
+Go语言程序, 可直接在[发布页](https://github.com/Mikubill/acfun-uploader/releases)下载使用。
+
+
 ```shell
 ./acfun-uploader [options] file(s)
 
@@ -19,4 +22,4 @@ Simple AcFun Video Uploader
 
 ## 缘起
 
-以前是把bilibili当视频床用的，但是它审核是在是太慢了，所以就换到Acfun来了www
+以前是把某B当视频床用的，但是它的审核是在是太慢了，所以就换到AcFun来了www
