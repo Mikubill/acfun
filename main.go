@@ -111,7 +111,7 @@ func main() {
 			if nr > 0 {
 				wg.Add(1)
 				ch <- &UploadPart{
-					content: buf,
+					content: buf[:nr],
 					count:   part,
 				}
 			}
