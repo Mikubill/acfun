@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/cheggaaa/pb/v3"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -16,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/cheggaaa/pb/v3"
 )
 
 var (
@@ -29,12 +30,14 @@ const (
 	UploadConfig   = "https://member.acfun.cn/video/api/getKSCloudToken"
 	UploadFinish   = "https://member.acfun.cn/video/api/uploadFinish"
 	CreateVideo    = "https://member.acfun.cn/video/api/createVideo"
+	UploadResume   = "https://mediacloud.kuaishou.com/api/upload/resume"
 	UploadEndpoint = "https://mediacloud.kuaishou.com/api/upload/fragment"
+	UploadComplete = "https://mediacloud.kuaishou.com/api/upload/complete"
 )
 
 type UploadConfigResp struct {
 	Result int               `json:"result"`
-	Host   string            `json:"host"`
+	Host   string            `json:"host-name"`
 	Config UploadConfigBlock `json:"uploadConfig"`
 	TaskID string            `json:"taskId"`
 	Token  string            `json:"token"`
@@ -86,6 +89,13 @@ func main() {
 			continue
 		}
 
+		resumeURL := fmt.Sprintf("%s?upload_token=%s", UploadResume, config.Token)
+		err = uploadRequest("GET", resumeURL)
+		if err != nil {
+			fmt.Printf("uploadRequest returns error: %v", err)
+			continue
+		}
+
 		bar := pb.Full.Start64(info.Size())
 		bar.Set(pb.Bytes, true)
 		file, err := os.Open(v)
@@ -97,13 +107,13 @@ func main() {
 		wg := new(sync.WaitGroup)
 		ch := make(chan *UploadPart)
 		for i := 0; i < config.Config.Parallel; i++ {
-			go uploader(config.Token, &ch, wg, bar)
+			go uploader(config.Token, config.Config.PartSize-1, info.Size(), &ch, wg, bar)
 		}
 
-		buf := make([]byte, config.Config.PartSize)
-		part := int64(0)
+		part := int64(-1)
 		for {
 			part++
+			buf := make([]byte, config.Config.PartSize-1)
 			nr, err := file.Read(buf[:])
 			if nr <= 0 || err != nil {
 				break
@@ -121,8 +131,12 @@ func main() {
 		close(ch)
 		_ = file.Close()
 		bar.Finish()
+
+		if *debug {
+			log.Printf("total number of fragment parts: %d", part)
+		}
 		// finish upload
-		err = finishUpload(config.TaskID, path.Base(v))
+		err = finishUpload(config.Token, part, config.TaskID, path.Base(v))
 		if err != nil {
 			fmt.Printf("finishUpload returns error: %v", err)
 			continue
@@ -135,7 +149,7 @@ func printUsage() {
 	flag.PrintDefaults()
 }
 
-func uploader(token string, ch *chan *UploadPart, wg *sync.WaitGroup, bar *pb.ProgressBar) {
+func uploader(token string, partSize int, fileSize int64, ch *chan *UploadPart, wg *sync.WaitGroup, bar *pb.ProgressBar) {
 	for item := range *ch {
 		if *debug {
 			log.Printf("part %d start uploading", item.count)
@@ -143,8 +157,16 @@ func uploader(token string, ch *chan *UploadPart, wg *sync.WaitGroup, bar *pb.Pr
 		client := http.Client{Timeout: 10 * time.Second}
 		data := new(bytes.Buffer)
 		data.Write(item.content)
-		postURL := fmt.Sprintf("%s?fragment_id=%d&upload_token=%s", UploadEndpoint, item.count, token)
-		resp, err := client.Post(postURL, "application/octet-stream", data)
+		postURL := fmt.Sprintf("%s?upload_token=%s&fragment_id=%d", UploadEndpoint, token, item.count)
+		req, err := http.NewRequest("POST", postURL, data)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		start := item.count * int64(partSize)
+		contentRange := fmt.Sprintf("bytes %d-%d/%d", start, start+int64(len(item.content))-1, fileSize)
+		req.Header.Set("Content-Range", contentRange)
+		if *debug {
+			log.Println(req.Header)
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			if *debug {
 				log.Printf("failed uploading part %d error: %v (retring)", item.count, err)
@@ -157,46 +179,61 @@ func uploader(token string, ch *chan *UploadPart, wg *sync.WaitGroup, bar *pb.Pr
 			if err != nil {
 				log.Printf("failed uploading part %d error: %v (retring)", item.count, err)
 				*ch <- item
+				_ = resp.Body.Close()
 				continue
 			}
 
 			log.Printf("part %d finished. Result: %s", item.count, string(body))
-			_ = resp.Body.Close()
 		}
+		_ = resp.Body.Close()
 		bar.Add(len(item.content))
 		wg.Done()
 	}
 
 }
 
-func finishUpload(task string, filename string) error {
+func finishUpload(token string, part int64, task string, filename string) error {
 	if *debug {
 		log.Println("finishing upload...")
-		log.Println("step1 -> api/uploadFinish")
+		log.Println("step1 -> api/uploadComplete")
 	}
-
-	data := url.Values{"taskId": []string{task}}
-	if *debug {
-		log.Printf("postBody: %v", data.Encode())
-		log.Printf("endpoint: %s", UploadFinish)
-	}
-	_, err := request(UploadFinish, data.Encode())
+	completeURL := fmt.Sprintf("%s?fragment_count=%d&upload_token=%s", UploadComplete, part, token)
+	err := uploadRequest("POST", completeURL)
 	if err != nil {
+		log.Printf("uploadRequest returns error: %v", err)
 		return err
 	}
 
 	if *debug {
 		log.Println("step2 -> api/createVideo")
 	}
-	data = url.Values{
+	data := url.Values{
 		"videoKey": []string{task},
 		"fileName": []string{filename},
 		"vodType":  []string{"ksCloud"},
+	}
+	if *debug {
+		log.Printf("postBody: %v", data.Encode())
+		log.Printf("endpoint: %s", CreateVideo)
 	}
 	_, err = request(CreateVideo, data.Encode())
 	if err != nil {
 		return err
 	}
+
+	if *debug {
+		log.Println("step3 -> api/uploadFinish")
+	}
+	data = url.Values{"taskId": []string{task}}
+	if *debug {
+		log.Printf("postBody: %v", data.Encode())
+		log.Printf("endpoint: %s", UploadFinish)
+	}
+	_, err = request(UploadFinish, data.Encode())
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -254,6 +291,7 @@ func request(link string, postBody string) ([]byte, error) {
 		}
 		return nil, err
 	}
+	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		if *debug {
@@ -261,7 +299,6 @@ func request(link string, postBody string) ([]byte, error) {
 		}
 		return nil, err
 	}
-	_ = resp.Body.Close()
 	if *debug {
 		log.Printf("returns: %v", string(body))
 	}
@@ -274,4 +311,32 @@ func getFileInfo(path string) (os.FileInfo, error) {
 		return nil, err
 	}
 	return info, nil
+}
+
+func uploadRequest(method string, link string) error {
+	client := http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest(method, link, nil)
+	if err != nil {
+		if *debug {
+			log.Printf("upload request returns err: %v", err)
+		}
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		if *debug {
+			log.Printf("response of upload request returns err: %v", err)
+		}
+		return err
+	}
+	defer resp.Body.Close()
+	if *debug {
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			log.Printf("read response of upload request returns err: %v", err)
+			return err
+		}
+		log.Printf("upload request response: %s", string(body))
+	}
+	return nil
 }
