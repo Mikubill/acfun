@@ -55,6 +55,12 @@ type UploadPart struct {
 	count   int64
 }
 
+type UploadPartResult struct {
+	Result   int    `json:"result"`
+	Checksum string `json:"checksum"`
+	Size     int64  `json:"size"`
+}
+
 func main() {
 	flag.Parse()
 	files := flag.Args()
@@ -174,22 +180,40 @@ func uploader(token string, partSize int, fileSize int64, ch *chan *UploadPart, 
 			*ch <- item
 			continue
 		}
-		if *debug {
-			body, err := ioutil.ReadAll(resp.Body)
-			if err != nil {
-				log.Printf("failed uploading part %d error: %v (retring)", item.count, err)
-				*ch <- item
-				_ = resp.Body.Close()
-				continue
+		body, err := ioutil.ReadAll(resp.Body)
+		if err != nil {
+			if *debug {
+				log.Printf("failed reading upload part %d response error: %v (retring)", item.count, err)
 			}
-
-			log.Printf("part %d finished. Result: %s", item.count, string(body))
+			*ch <- item
+			_ = resp.Body.Close()
+			continue
+		}
+		if *debug {
+			log.Printf("upload part %d finished. Result: %s", item.count, string(body))
+		}
+		result := new(UploadPartResult)
+		err = json.Unmarshal(body, result)
+		if err != nil {
+			if *debug {
+				log.Printf("failed unmarshaling upload part %d response to json error: %v (retring)", item.count, err)
+			}
+			*ch <- item
+			_ = resp.Body.Close()
+			continue
+		}
+		if result.Result != 1 || result.Size != int64(len(item.content)) {
+			if *debug {
+				log.Printf("failed uploading part %d response: %+v (retring)", item.count, *result)
+			}
+			*ch <- item
+			_ = resp.Body.Close()
+			continue
 		}
 		_ = resp.Body.Close()
 		bar.Add(len(item.content))
 		wg.Done()
 	}
-
 }
 
 func finishUpload(token string, part int64, task string, filename string) error {
@@ -252,7 +276,7 @@ func getUploadConfig(info os.FileInfo) (*UploadConfigResp, error) {
 		return nil, err
 	}
 	config := new(UploadConfigResp)
-	err = json.Unmarshal(body, &config)
+	err = json.Unmarshal(body, config)
 	if err != nil {
 		return nil, err
 	}
