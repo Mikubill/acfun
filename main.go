@@ -177,7 +177,9 @@ func uploader(token string, partSize int, fileSize int64, ch *chan *UploadPart, 
 			if *debug {
 				log.Printf("failed uploading part %d error: %v (retring)", item.count, err)
 			}
-			*ch <- item
+			go func() {
+				*ch <- item
+			}()
 			continue
 		}
 		body, err := ioutil.ReadAll(resp.Body)
@@ -185,7 +187,9 @@ func uploader(token string, partSize int, fileSize int64, ch *chan *UploadPart, 
 			if *debug {
 				log.Printf("failed reading upload part %d response error: %v (retring)", item.count, err)
 			}
-			*ch <- item
+			go func() {
+				*ch <- item
+			}()
 			_ = resp.Body.Close()
 			continue
 		}
@@ -198,7 +202,9 @@ func uploader(token string, partSize int, fileSize int64, ch *chan *UploadPart, 
 			if *debug {
 				log.Printf("failed unmarshaling upload part %d response to json error: %v (retring)", item.count, err)
 			}
-			*ch <- item
+			go func() {
+				*ch <- item
+			}()
 			_ = resp.Body.Close()
 			continue
 		}
@@ -206,7 +212,9 @@ func uploader(token string, partSize int, fileSize int64, ch *chan *UploadPart, 
 			if *debug {
 				log.Printf("failed uploading part %d response: %+v (retring)", item.count, *result)
 			}
-			*ch <- item
+			go func() {
+				*ch <- item
+			}()
 			_ = resp.Body.Close()
 			continue
 		}
