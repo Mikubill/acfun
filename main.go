@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -160,6 +162,14 @@ func uploader(token string, partSize int, fileSize int64, ch *chan *UploadPart, 
 		if *debug {
 			log.Printf("part %d start uploading", item.count)
 		}
+		var md5Hash string
+		var md5Wg sync.WaitGroup
+		md5Wg.Add(1)
+		go func() {
+			defer md5Wg.Done()
+			sum := md5.Sum(item.content)
+			md5Hash = hex.EncodeToString(sum[:])
+		}()
 		client := http.Client{Timeout: 10 * time.Second}
 		data := new(bytes.Buffer)
 		data.Write(item.content)
@@ -208,7 +218,8 @@ func uploader(token string, partSize int, fileSize int64, ch *chan *UploadPart, 
 			_ = resp.Body.Close()
 			continue
 		}
-		if result.Result != 1 || result.Size != int64(len(item.content)) {
+		md5Wg.Wait()
+		if result.Result != 1 || result.Size != int64(len(item.content)) || result.Checksum != md5Hash {
 			if *debug {
 				log.Printf("failed uploading part %d response: %+v (retring)", item.count, *result)
 			}
